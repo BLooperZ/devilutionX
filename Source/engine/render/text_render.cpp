@@ -35,6 +35,7 @@
 #include "utils/language.h"
 #include "utils/log.hpp"
 #include "utils/str_cat.hpp"
+#include "utils/unicode-bidi.hpp"
 #include "utils/utf8.hpp"
 
 namespace devilution {
@@ -452,36 +453,33 @@ void DrawLine(
 {
 	CurrentFont currentFont;
 
-	size_t currentPos = 0;
+	const int lineEndPos = static_cast<int>(lineStartPos + text.size());
 
-	const auto maybeDrawCursor = [&]() {
-		const auto byteIndex = static_cast<int>(lineStartPos + currentPos);
-		Point position = characterPosition;
-		if (opts.cursorPosition == byteIndex) {
-			if (GetAnimationFrame(2, 500) != 0 || opts.cursorStatic) {
-				FontStack baseFont = LoadFont(size, color, 0);
-				if (baseFont.has_value()) {
-					DrawFont(out, position, baseFont.glyph('|'), color, outline);
-				}
-			}
-			if (opts.renderedCursorPositionOut != nullptr) {
-				*opts.renderedCursorPositionOut = position;
-			}
+	const auto maybeDrawCursor = [&](bool isRTL, int charWidth, int shift = 0) {
+		if (GetAnimationFrame(2, 500) != 0 || opts.cursorStatic) {
+			FontStack baseFont = LoadFont(size, color, 0);
+			if (!baseFont.has_value())
+				return;
+			const int cursorWidth = static_cast<int>(baseFont.glyph('|').width());
+			shift += isRTL ? charWidth - cursorWidth : 0;
+			Point pos = characterPosition;
+			pos.x += shift;
+			DrawFont(out, pos, baseFont.glyph('|'), color, outline);
+			if (opts.renderedCursorPositionOut != nullptr)
+				*opts.renderedCursorPositionOut = pos;
 		}
 	};
 
 	// Start from the beginning of the line
 	characterPosition.x = GetLineStartX(flags, rect, totalWidth);
+	const BidiVisualText bidi(text);
 
-	for (auto it = Utf8CodePoints(text).begin(), itEnd = Utf8CodePoints(text).end();
-	     it != itEnd; ++it) {
-		char32_t c = *it;
+	for (auto it = bidi.begin(), end = bidi.end(); it != end; ++it) {
+		auto [c, logicalPos, cpLen, isRTL] = *it;
 		if (c == Utf8DecodeError) break;
-		const auto cpLen = it.size();
-		if (c == ZWSP) {
-			currentPos += cpLen;
+
+		if (c == ZWSP)
 			continue;
-		}
 
 		if (!currentFont.load(size, color, c)) {
 			c = U'?';
@@ -494,25 +492,29 @@ void DrawLine(
 		const ClxSprite glyph = currentFont.glyph(frame);
 		const int charWidth = glyph.width();
 
-		const auto byteIndex = static_cast<int>(lineStartPos + currentPos);
+		const auto byteIndex = static_cast<int>(lineStartPos + logicalPos);
+		const auto afterIndex = static_cast<int>(lineStartPos + logicalPos + cpLen);
 
 		// Draw highlight
 		if (byteIndex >= opts.highlightRange.begin && byteIndex < opts.highlightRange.end) {
-			const bool lastInRange = static_cast<int>(byteIndex + cpLen) == opts.highlightRange.end;
+			const bool lastInRange = afterIndex == opts.highlightRange.end;
 			FillRect(out, characterPosition.x, characterPosition.y,
 			    glyph.width() + (lastInRange ? 0 : curSpacing), glyph.height(),
 			    opts.highlightColor);
 		}
 
 		DrawFont(out, characterPosition, glyph, color, outline);
-		maybeDrawCursor();
+		if (opts.cursorPosition == byteIndex)
+			maybeDrawCursor(isRTL, charWidth, 0);
+		if (isRTL && opts.cursorPosition == afterIndex && opts.cursorPosition == lineEndPos)
+			maybeDrawCursor(true, charWidth, -charWidth);
 
 		// Move to the next position
 		characterPosition.x += charWidth + curSpacing;
-		currentPos += cpLen;
+
+		if (!isRTL && opts.cursorPosition == afterIndex)
+			maybeDrawCursor(false, charWidth, 0);
 	}
-	assert(currentPos == text.size());
-	maybeDrawCursor();
 }
 
 uint32_t DoDrawString(const Surface &out, std::string_view text, Rectangle rect, Point &characterPosition,
